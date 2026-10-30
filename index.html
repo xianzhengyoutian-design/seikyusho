@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>請求書スキャン</title>
+<style>
+  html,body{margin:0;height:100%}
+  body{font-family:sans-serif;background:#f5f7fa;color:#1a1a1a;text-align:center;
+    display:flex;flex-direction:column;height:100vh;height:100dvh;box-sizing:border-box;padding:12px 16px 16px}
+  h1{font-size:18px;margin:0 0 8px}
+  #view{flex:1;min-height:0;position:relative;background:#222;border-radius:12px;overflow:hidden}
+  #video{width:100%;height:100%;object-fit:contain;display:block}
+  #flash{position:absolute;inset:0;background:#fff;opacity:0;pointer-events:none;transition:opacity .3s}
+  #msg{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+    color:#fff;font-size:17px;padding:16px;line-height:1.6}
+  #status{margin:8px 0 2px;font-size:16px;min-height:1.4em}
+  #count{font-size:15px;color:#333;margin-bottom:6px}
+  ul{list-style:none;padding:0;margin:0 0 8px;text-align:left;max-height:72px;overflow-y:auto}
+  li{background:#fff;border:1px solid #ccc;border-radius:8px;padding:4px 10px;margin:3px 0;font-size:14px}
+  .ok{color:#166534}.ng{color:#b91c1c}.wait{color:#92400e}
+  #shoot{display:block;width:100%;flex-shrink:0;padding:28px 0;font-size:26px;font-weight:bold;
+    background:#dbeafe;color:#1e3a8a;border:3px solid #1e3a8a;border-radius:16px}
+  #shoot:active{background:#bfdbfe}
+</style>
+</head>
+<body>
+<h1>請求書スキャン</h1>
+<div id="view">
+  <video id="video" autoplay playsinline muted></video>
+  <div id="flash"></div>
+  <div id="msg">カメラを起動しています…</div>
+</div>
+<div id="status"></div>
+<div id="count">送信済み:0枚</div>
+<ul id="list"></ul>
+<button id="shoot">📷 撮影する</button>
+<input id="cam" type="file" accept="image/*" capture="environment" style="display:none">
+<script>
+const UPLOAD_URL = 'https://script.google.com/macros/s/AKfycbyl4BQzrNUbHtpENsfC8KN0lxwXMoh_cuKrYC5HU04ArDajEqUsHRuwI5W38n2IRkvI/exec';
+const MAX = 3000, QUALITY = 0.9;
+let sent = 0, seq = 0, stream = null, imageCapture = null, live = false, busy = false;
+const video = document.getElementById('video');
+const msg = document.getElementById('msg');
+const cam = document.getElementById('cam');
+
+startCamera();
+
+async function startCamera() {
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: 'environment' }, width: { ideal: 3840 }, height: { ideal: 2160 } },
+      audio: false
+    });
+    video.srcObject = stream;
+    await video.play();
+    const track = stream.getVideoTracks()[0];
+    imageCapture = null;
+    if ('ImageCapture' in window) { try { imageCapture = new ImageCapture(track); } catch (e) {} }
+    live = true;
+    msg.style.display = 'none';
+    setStatus('請求書全体を映して「撮影する」を押してください');
+  } catch (e) {
+    live = false;
+    msg.style.display = 'flex';
+    msg.textContent = 'カメラを表示できませんでした。カメラの使用を許可してから開き直すか、下のボタンを押してください';
+    setStatus('ボタンを押すとカメラが開きます');
+  }
+}
+
+// アプリを切り替えて戻ってきたときにカメラを再開する
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && live) {
+    const t = stream && stream.getVideoTracks()[0];
+    if (!t || t.readyState === 'ended') startCamera();
+  }
+});
+
+document.getElementById('shoot').onclick = async () => {
+  if (!live) { cam.value = ''; cam.click(); return; }
+  if (busy) return;
+  busy = true;
+  flash();
+  try {
+    send(await grab());
+  } catch (e) {
+    setStatus('撮影できませんでした。もう一度押してください');
+  }
+  busy = false;
+};
+cam.onchange = () => { const f = cam.files[0]; if (f) resize(f).then(send).catch(() => setStatus('画像を読み込めませんでした')); };
+
+async function grab() {
+  if (imageCapture) {
+    try { return await resize(await imageCapture.takePhoto()); } catch (e) {}
+  }
+  let w = video.videoWidth, h = video.videoHeight;
+  const s = Math.min(1, MAX / Math.max(w, h));
+  w = Math.round(w * s); h = Math.round(h * s);
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  c.getContext('2d').drawImage(video, 0, 0, w, h);
+  return c.toDataURL('image/jpeg', QUALITY);
+}
+
+function send(dataUrl) {
+  const n = ++seq;
+  const li = document.createElement('li');
+  li.innerHTML = '<span class="wait">' + n + '枚目:送信中…</span>';
+  document.getElementById('list').prepend(li);
+  setStatus('送信中です。続けて撮影できます');
+  fetch(UPLOAD_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+    body: dataUrl
+  })
+    .then(res => res.json())
+    .then(r => {
+      if (!r.ok) throw new Error(r.error);
+      sent++;
+      li.innerHTML = '<span class="ok">' + n + '枚目:送信しました</span>';
+      document.getElementById('count').textContent = '送信済み:' + sent + '枚';
+      setStatus('送信しました。次の請求書を撮影できます');
+    })
+    .catch(() => {
+      li.innerHTML = '<span class="ng">' + n + '枚目:送信に失敗しました。もう一度撮影してください</span>';
+      setStatus('送信に失敗しました');
+    });
+}
+
+function resize(file) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      let w = img.naturalWidth, h = img.naturalHeight;
+      const s = Math.min(1, MAX / Math.max(w, h));
+      w = Math.round(w * s); h = Math.round(h * s);
+      const c = document.createElement('canvas');
+      c.width = w; c.height = h;
+      c.getContext('2d').drawImage(img, 0, 0, w, h);
+      URL.revokeObjectURL(url);
+      resolve(c.toDataURL('image/jpeg', QUALITY));
+    };
+    img.onerror = reject;
+    img.src = url;
+  });
+}
+
+function flash() {
+  const f = document.getElementById('flash');
+  f.style.transition = 'none'; f.style.opacity = '0.8';
+  requestAnimationFrame(() => { f.style.transition = 'opacity .3s'; f.style.opacity = '0'; });
+}
+function setStatus(t) { document.getElementById('status').textContent = t; }
+</script>
+</body>
+</html>
